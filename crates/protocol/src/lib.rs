@@ -1,14 +1,6 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! JSON-RPC 2.0 and MCP wire types shared by the mesh's core and CLI crates.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod jsonrpc;
+pub mod mcp;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use jsonrpc::{ErrorObject, Id, Notification, Outcome, Request, Response, V2};

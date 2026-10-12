@@ -32,20 +32,20 @@
 Clients (Claude Code, Cursor, CI agent, …)
     │  stdio / streamable HTTP
     ▼
-┌────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────┐
 │                      mcp-mesh (1 static binary)          │
 │                                                          │
 │  Protocol Gateway ──► Selection Pipeline ──► Policy      │
 │  (JSON-RPC 2.0,     (0 rules → 1 recall →   Engine       │
 │   MCP spec)          2 Jev → 3 gate → 4 assemble)        │
-│        │                      │            │            │
+│        │                      │            │             │
 │  Metadata Cache     Guardrail Scanner    Approval        │
 │  (tools/list,       (Noul on results +    Flow           │
 │   listChanged)       regex prefilter)    (elicitation    │
 │        │                      │          / TUI)          │
 │  Supervisor ─────────────────┴──────► Audit (JSONL)      │
 │  (spawn/restart/health)              & Metrics           │
-└────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────┘
     │  stdio / HTTP (one connection per upstream)
     ▼
  Upstreams: postgres, filesystem, git, remote (OAuth) …
@@ -53,17 +53,17 @@ Clients (Claude Code, Cursor, CI agent, …)
 
 ### Components & Responsibilities
 
-| Component | Responsibility | Notes |
-|---|---|---|
-| Protocol Gateway | JSON-RPC 2.0, MCP spec (streamable HTTP + stdio), method routing | Thin design: relies purely on the stable JSON-RPC envelope and method names. |
-| Supervisor | Spawn/kill stdio upstreams, backoff restarts, health checks, log capture | Built on `tokio::process`; issues SIGTERM → SIGKILL on shutdown. |
-| Tool Registry | Namespaced IDs (`pg__query`), stable slugs, annotations, per-client views | IDs remain stable across restarts for selection and audit correlation. |
-| Selection Pipeline | Executes stages 0–4 of the selection workflow | Details outlined in §2.1. |
-| Policy Engine | Deterministic rule evaluation and approval orchestration | The core durable asset of the proxy. |
-| Guardrail Scanner | Noul injection scan on tool results with regex prefilter | Failures are never silent; logged explicitly as `scan_failed`. |
-| Metadata Cache | Handles `tools/list` caching with a TTL backstop and `listChanged` hooks | Ensures low-overhead schema lookups. |
-| Audit & Metrics | JSONL event logs and optional OTel integration | Feeds the downstream recalibration loop. |
-| Decision Adapter | Trait wrapper abstracting `rules \| embed \| jev` | Keeps Jev decoupled from core architectural logic. |
+| Component          | Responsibility                                                            | Notes                                                                        |
+| ------------------ | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Protocol Gateway   | JSON-RPC 2.0, MCP spec (streamable HTTP + stdio), method routing          | Thin design: relies purely on the stable JSON-RPC envelope and method names. |
+| Supervisor         | Spawn/kill stdio upstreams, backoff restarts, health checks, log capture  | Built on `tokio::process`; issues SIGTERM → SIGKILL on shutdown.             |
+| Tool Registry      | Namespaced IDs (`pg__query`), stable slugs, annotations, per-client views | IDs remain stable across restarts for selection and audit correlation.       |
+| Selection Pipeline | Executes stages 0–4 of the selection workflow                             | Details outlined in §2.1.                                                    |
+| Policy Engine      | Deterministic rule evaluation and approval orchestration                  | The core durable asset of the proxy.                                         |
+| Guardrail Scanner  | Noul injection scan on tool results with regex prefilter                  | Failures are never silent; logged explicitly as `scan_failed`.               |
+| Metadata Cache     | Handles `tools/list` caching with a TTL backstop and `listChanged` hooks  | Ensures low-overhead schema lookups.                                         |
+| Audit & Metrics    | JSONL event logs and optional OTel integration                            | Feeds the downstream recalibration loop.                                     |
+| Decision Adapter   | Trait wrapper abstracting `rules \| embed \| jev`                         | Keeps Jev decoupled from core architectural logic.                           |
 
 ### 2.1 Selection Lifecycle
 
@@ -101,7 +101,7 @@ mcp-mesh/
 - **D2 — Decision Adapter Trait:** Decouples the decision engine behind an async trait (`Selector`), keeping Jev fully swappable. Hysteresis logic is implemented as a pure function to enable exhaustive property testing (`proptest`).
 - **D3 — Failure Semantics:**
   - Selection timeout → fallback to rules selector (fail-closed: no model, no schema injection beyond pinned tools).
-  - Injection scan error → pass and emit `scan_failed` (**fail-open, by deliberate choice** — the one exception to the fail-closed posture everywhere else in this list. Rationale: a scanner outage must not stall every tool call mesh-wide. The trade-off is that unscanned results reach the client during an outage; `scan_failed` is logged at error severity and surfaced in `mcp-mesh explain` so the gap is never silent. Revisit if M4's poisoned-corpus evals show this window is exploitable in practice.)
+  - Injection scan error → pass and emit `scan_failed` (**fail-open, by deliberate choice** — the one exception to the fail-closed posture everywher─e else in this list. Rationale: a scanner outage must not stall every tool call mesh-wide. The trade-off is that unscanned results reach the client during an outage; `scan_failed` is logged at error severity and surfaced in `mcp-mesh explain` so the gap is never silent. Revisit if M4's poisoned-corpus evals show this window is exploitable in practice.)
   - Destructive approval timeout → Deny (fail-closed).
   - Upstream failure → remove from pool, mark degraded, backoff restart.
 - **D4 — Configuration:** Centralized TOML configuration file handling proxy bindings, upstream declarations, client profiles, selection thresholds, and audit paths.
@@ -124,11 +124,11 @@ mcp-mesh/
 
 ## 6. Milestones & Schedule
 
-| Phase | Weeks | Scope & Deliverables | Exit Criteria |
-|---|---|---|---|
-| M0 — Spike & Validate | 1 | Developer interviews, token bloat analysis, Jev integration spike, protocol SDK spike. **Kill-switch question:** does Jev beat the rules-only fallback by enough margin to justify the added latency and failure-mode surface? The SDK and protocol spikes are groundwork, not gating — if Jev doesn't clear that bar, the project still ships as a deterministic-only proxy. | One-pager with measured metrics and go/no-go decision |
-| M1 — Core Mesh | 2–5 | Routing stdio/HTTP upstreams, namespacing, metadata cache, supervision | 3 servers behind proxy, 2 clients attached; P99 proxy-added overhead < 1ms on passthrough calls (i.e. deterministic routing path, excluding Jev/Noul model hops and upstream round-trip time) |
-| M2 — Policy Engine | 5–7 | Rule evaluation, approval workflows (TUI/elicitation), failure semantics | Destructive calls gated per profile; 100% audit explainability |
-| M3 — Intelligent Selection | 7–10 | Recall pipeline, Jev adapter with rules fallback, hysteresis property tests | P@k ≥ 0.90 on golden set (k = recall-stage candidate count, k ≤ 255 per §2.1 — i.e. the correct tool is retained among the top-k candidates passed to Jev in ≥ 90% of golden-set turns); ≥ 70% schema token savings |
-| M4 — Guardrails | 10–12 | Result scanning (Noul), quarantine/redaction actions, poisoned-corpus evals | Published TPR/FPR benchmark metrics |
-| M5 — Ship v1.0 | 12–14 | README benchmarks, use-case guides, cargo-dist packaging, external beta launch | v1.0 tag released with active telemetry feedback loop |
+| Phase                      | Weeks | Scope & Deliverables                                                                                                                                                                                                                                                                                                                                                          | Exit Criteria                                                                                                                                                                                                       |
+| -------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M0 — Spike & Validate      | 1     | Developer interviews, token bloat analysis, Jev integration spike, protocol SDK spike. **Kill-switch question:** does Jev beat the rules-only fallback by enough margin to justify the added latency and failure-mode surface? The SDK and protocol spikes are groundwork, not gating — if Jev doesn't clear that bar, the project still ships as a deterministic-only proxy. | One-pager with measured metrics and go/no-go decision                                                                                                                                                               |
+| M1 — Core Mesh             | 2–5   | Routing stdio/HTTP upstreams, namespacing, metadata cache, supervision                                                                                                                                                                                                                                                                                                        | 3 servers behind proxy, 2 clients attached; P99 proxy-added overhead < 1ms on passthrough calls (i.e. deterministic routing path, excluding Jev/Noul model hops and upstream round-trip time)                       |
+| M2 — Policy Engine         | 5–7   | Rule evaluation, approval workflows (TUI/elicitation), failure semantics                                                                                                                                                                                                                                                                                                      | Destructive calls gated per profile; 100% audit explainability                                                                                                                                                      |
+| M3 — Intelligent Selection | 7–10  | Recall pipeline, Jev adapter with rules fallback, hysteresis property tests                                                                                                                                                                                                                                                                                                   | P@k ≥ 0.90 on golden set (k = recall-stage candidate count, k ≤ 255 per §2.1 — i.e. the correct tool is retained among the top-k candidates passed to Jev in ≥ 90% of golden-set turns); ≥ 70% schema token savings |
+| M4 — Guardrails            | 10–12 | Result scanning (Noul), quarantine/redaction actions, poisoned-corpus evals                                                                                                                                                                                                                                                                                                   | Published TPR/FPR benchmark metrics                                                                                                                                                                                 |
+| M5 — Ship v1.0             | 12–14 | README benchmarks, use-case guides, cargo-dist packaging, external beta launch                                                                                                                                                                                                                                                                                                | v1.0 tag released with active telemetry feedback loop                                                                                                                                                               |
