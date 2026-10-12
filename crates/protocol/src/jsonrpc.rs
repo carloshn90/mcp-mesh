@@ -27,7 +27,7 @@ impl<'de> Deserialize<'de> for V2 {
 }
 
 /// A JSON-RPC request id: a number, a string, or `null`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Id {
     Null,
@@ -100,6 +100,29 @@ impl Response {
             },
         }
     }
+
+    pub fn from_outcome(id: Id, outcome: Outcome) -> Self {
+        Self {
+            jsonrpc: V2,
+            id,
+            outcome,
+        }
+    }
+}
+
+/// A message read from a peer, before it's known whether it's a reply to a
+/// pending call or an unsolicited notification. Tried as a `Response` first
+/// (which requires an `id`), falling back to `Notification`.
+///
+/// This assumes the peer never sends us a genuine `Request` (something with
+/// both `id` and `method`, expecting a reply from us) — true for every
+/// upstream relationship in this mesh as of M1, where requests only ever
+/// flow mesh-to-upstream, not the other way around.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Incoming {
+    Response(Response),
+    Notification(Notification),
 }
 
 #[cfg(test)]
@@ -172,6 +195,26 @@ mod tests {
         let decoded: Response = serde_json::from_str(&encoded).unwrap();
         assert_eq!(resp, decoded);
         assert!(matches!(decoded.outcome, Outcome::Error { .. }));
+    }
+
+    #[test]
+    fn incoming_distinguishes_responses_from_notifications() {
+        let response_bytes = serde_json::to_string(&Response::success(Id::Number(1), json!({}))).unwrap();
+        let notification_bytes = serde_json::to_string(&Notification {
+            jsonrpc: V2,
+            method: "notifications/tools/list_changed".to_string(),
+            params: None,
+        })
+        .unwrap();
+
+        assert!(matches!(
+            serde_json::from_str::<Incoming>(&response_bytes).unwrap(),
+            Incoming::Response(_)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Incoming>(&notification_bytes).unwrap(),
+            Incoming::Notification(_)
+        ));
     }
 
     #[test]

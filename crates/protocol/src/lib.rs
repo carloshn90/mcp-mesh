@@ -5,4 +5,4 @@ pub mod jsonrpc;
 pub mod mcp;
 
 pub use codec::{MessageReader, MessageWriter};
-pub use jsonrpc::{ErrorObject, Id, Notification, Outcome, Request, Response, V2};
+pub use jsonrpc::{ErrorObject, Id, Incoming, Notification, Outcome, Request, Response, V2};

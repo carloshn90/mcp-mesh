@@ -17,6 +17,7 @@ fn fast_config() -> SupervisorConfig {
         restart_backoff: Duration::from_millis(100),
         shutdown_grace_period: Duration::from_millis(500),
         max_restart_attempts: None,
+        request_timeout: Duration::from_secs(2),
     }
 }
 

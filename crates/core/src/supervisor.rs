@@ -1,21 +1,22 @@
 //! Supervisor: spawns a stdio upstream process, performs an `initialize`
-//! handshake as a health check, restarts it with backoff on crash, and
-//! performs SIGTERM-then-SIGKILL graceful shutdown.
-//!
-//! Scope: this module only supervises the process lifecycle. Forwarding
-//! arbitrary `tools/call` requests to a live upstream is the Gateway's job
-//! (a later step) and will extend this module when that's actually needed.
+//! handshake as a health check, restarts it with backoff on crash, performs
+//! SIGTERM-then-SIGKILL graceful shutdown, and forwards arbitrary requests
+//! (`tools/list`, `tools/call`, ...) to the currently live child.
 
+use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
+
+use serde_json::Value;
 
 use mcp_mesh_protocol::jsonrpc::{Id, Outcome, Request, V2};
 use mcp_mesh_protocol::mcp::{Implementation, InitializeParams, METHOD_INITIALIZE};
-use mcp_mesh_protocol::{MessageReader, MessageWriter, Response};
+use mcp_mesh_protocol::{Incoming, MessageReader, MessageWriter};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
 use crate::UpstreamId;
@@ -35,6 +36,8 @@ pub struct SupervisorConfig {
     pub restart_backoff: Duration,
     pub shutdown_grace_period: Duration,
     pub max_restart_attempts: Option<u32>,
+    /// How long `Supervisor::call` waits for a matching response.
+    pub request_timeout: Duration,
 }
 
 impl Default for SupervisorConfig {
@@ -44,6 +47,7 @@ impl Default for SupervisorConfig {
             restart_backoff: Duration::from_secs(1),
             shutdown_grace_period: Duration::from_secs(5),
             max_restart_attempts: None,
+            request_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -61,8 +65,29 @@ pub enum SupervisorEvent {
     ShutDown,
 }
 
+/// Why a forwarded `Supervisor::call` didn't produce an upstream `Outcome`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallError {
+    /// The supervision task has already stopped (shut down or gave up).
+    NotRunning,
+    /// No response arrived within `SupervisorConfig::request_timeout`.
+    Timeout,
+    /// The connection to the upstream was lost before a response arrived.
+    UpstreamClosed,
+}
+
+/// A request queued for the currently (or soon-to-be) live child, together
+/// with where to deliver its eventual outcome.
+struct PendingCall {
+    method: String,
+    params: Option<Value>,
+    respond_to: oneshot::Sender<Outcome>,
+}
+
 /// Handle to a running supervision task for one upstream.
 pub struct Supervisor {
+    call_tx: mpsc::Sender<PendingCall>,
+    call_timeout: Duration,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
@@ -76,14 +101,38 @@ impl Supervisor {
     ) -> (Self, mpsc::Receiver<SupervisorEvent>) {
         let (events_tx, events_rx) = mpsc::channel(32);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(run(spec, config, events_tx, shutdown_rx));
+        let (call_tx, call_rx) = mpsc::channel(32);
+        let call_timeout = config.request_timeout;
+        let task = tokio::spawn(run(spec, config, events_tx, call_rx, shutdown_rx));
         (
             Self {
+                call_tx,
+                call_timeout,
                 shutdown_tx: Some(shutdown_tx),
                 task: Some(task),
             },
             events_rx,
         )
+    }
+
+    /// Forwards one JSON-RPC call to the currently live upstream and awaits
+    /// its matching response. Queued and sent once the upstream is ready if
+    /// a restart is in progress; bounded by `request_timeout` either way.
+    pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Outcome, CallError> {
+        let (respond_to, rx) = oneshot::channel();
+        self.call_tx
+            .send(PendingCall {
+                method: method.to_string(),
+                params,
+                respond_to,
+            })
+            .await
+            .map_err(|_| CallError::NotRunning)?;
+        match tokio::time::timeout(self.call_timeout, rx).await {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(_)) => Err(CallError::UpstreamClosed),
+            Err(_) => Err(CallError::Timeout),
+        }
     }
 
     /// Requests graceful shutdown (SIGTERM, then SIGKILL after the grace
@@ -98,7 +147,7 @@ impl Supervisor {
     }
 }
 
-fn initialize_request() -> Request {
+fn initialize_request(id: Id) -> Request {
     let params = InitializeParams {
         protocol_version: "2025-06-18".to_string(),
         capabilities: serde_json::json!({}),
@@ -109,7 +158,7 @@ fn initialize_request() -> Request {
     };
     Request {
         jsonrpc: V2,
-        id: Id::Number(0),
+        id,
         method: METHOD_INITIALIZE.to_string(),
         params: Some(serde_json::to_value(params).expect("InitializeParams always serializes")),
     }
@@ -138,9 +187,37 @@ async fn graceful_shutdown(child: &mut Child, grace_period: Duration) {
     }
 }
 
-/// Waits out the restart backoff, or stops early if asked to shut down while
-/// waiting. Returns `false` when the caller should stop looping (shutdown
-/// requested, or `max_restart_attempts` exceeded).
+type PendingResponses = Arc<AsyncMutex<HashMap<Id, oneshot::Sender<Outcome>>>>;
+
+/// Reads `Response`/`Notification` lines from the child's stdout for as
+/// long as the pipe stays open: resolves the matching pending call for a
+/// response, or republishes a notification as a `SupervisorEvent` for
+/// callers (e.g. a future cache-invalidation listener) to react to.
+///
+/// Self-terminating: returns as soon as the child closes stdout (crash or
+/// normal exit) or sends an undecodable line, with no need for the caller
+/// to explicitly cancel it.
+async fn run_reader(mut reader: MessageReader<tokio::process::ChildStdout, Incoming>, pending: PendingResponses) {
+    loop {
+        match reader.read_message().await {
+            Ok(Some(Incoming::Response(response))) => {
+                if let Some(sender) = pending.lock().await.remove(&response.id) {
+                    let _ = sender.send(response.outcome);
+                }
+            }
+            Ok(Some(Incoming::Notification(_notification))) => {
+                // Wiring this into MetadataCache::refresh (e.g. on
+                // `listChanged`) is the Gateway's job; dropping it here for
+                // now just means metadata only refreshes lazily.
+            }
+            Ok(None) | Err(_) => return,
+        }
+    }
+}
+
+/// Waits out the restart backoff, or stops early if asked to shut down
+/// while waiting. Returns `false` when the caller should stop looping
+/// (shutdown requested, or `max_restart_attempts` exceeded).
 async fn backoff_or_give_up(
     events: &mpsc::Sender<SupervisorEvent>,
     shutdown_rx: &mut oneshot::Receiver<()>,
@@ -170,10 +247,16 @@ async fn backoff_or_give_up(
     }
 }
 
+enum ConnectedOutcome {
+    Exited,
+    Shutdown,
+}
+
 async fn run(
     spec: UpstreamSpec,
     config: SupervisorConfig,
     events: mpsc::Sender<SupervisorEvent>,
+    mut call_rx: mpsc::Receiver<PendingCall>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let mut attempt: u32 = 0;
@@ -194,26 +277,30 @@ async fn run(
         let stdin = child.stdin.take().expect("spawned with piped stdin");
         let stdout = child.stdout.take().expect("spawned with piped stdout");
         // Held for the lifetime of this child: dropping the writer early
-        // would close its stdin, which the fixture/upstream reads as EOF
-        // and exits on, masquerading as a crash.
+        // would close its stdin, which the upstream reads as EOF and exits
+        // on, masquerading as a crash.
         let mut writer = MessageWriter::<_, Request>::new(stdin);
-        let mut reader = MessageReader::<_, Response>::new(stdout);
+        let reader = MessageReader::<_, Incoming>::new(stdout);
+        let pending: PendingResponses = Arc::new(AsyncMutex::new(HashMap::new()));
 
-        let handshake = async {
-            writer.write_message(&initialize_request()).await?;
-            reader.read_message().await
-        };
+        let (ready_tx, ready_rx) = oneshot::channel();
+        pending.lock().await.insert(Id::Number(0), ready_tx);
+        let handshake_sent = writer
+            .write_message(&initialize_request(Id::Number(0)))
+            .await
+            .is_ok();
 
-        let healthy = matches!(
-            tokio::time::timeout(config.health_check_timeout, handshake).await,
-            Ok(Ok(Some(Response {
-                outcome: Outcome::Success { .. },
-                ..
-            })))
-        );
+        let reader_task = tokio::spawn(run_reader(reader, pending.clone()));
+
+        let healthy = handshake_sent
+            && matches!(
+                tokio::time::timeout(config.health_check_timeout, ready_rx).await,
+                Ok(Ok(Outcome::Success { .. }))
+            );
 
         if !healthy {
             let _ = events.send(SupervisorEvent::HealthCheckFailed).await;
+            reader_task.abort();
             let _ = child.kill().await;
             let _ = child.wait().await;
             attempt += 1;
@@ -226,15 +313,47 @@ async fn run(
         attempt = 0;
         let _ = events.send(SupervisorEvent::Ready).await;
 
-        tokio::select! {
-            _ = child.wait() => {
+        let mut next_id: i64 = 1;
+        let outcome = loop {
+            tokio::select! {
+                _ = child.wait() => break ConnectedOutcome::Exited,
+                _ = &mut shutdown_rx => break ConnectedOutcome::Shutdown,
+                call = call_rx.recv() => {
+                    let Some(pending_call) = call else {
+                        // All Supervisor handles were dropped; shutdown_rx
+                        // will also resolve shortly since it lives in the
+                        // same struct, so just keep looping until it does.
+                        continue;
+                    };
+                    let id = Id::Number(next_id);
+                    next_id += 1;
+                    pending.lock().await.insert(id.clone(), pending_call.respond_to);
+                    let request = Request {
+                        jsonrpc: V2,
+                        id,
+                        method: pending_call.method,
+                        params: pending_call.params,
+                    };
+                    // A write failure here means the child is on its way
+                    // out; child.wait() above will observe that shortly and
+                    // the dropped `pending` entry will resolve the caller's
+                    // `call()` with `CallError::UpstreamClosed`.
+                    let _ = writer.write_message(&request).await;
+                }
+            }
+        };
+
+        reader_task.abort();
+
+        match outcome {
+            ConnectedOutcome::Exited => {
                 let _ = events.send(SupervisorEvent::Exited).await;
                 attempt += 1;
                 if !backoff_or_give_up(&events, &mut shutdown_rx, &config, attempt).await {
                     return;
                 }
             }
-            _ = &mut shutdown_rx => {
+            ConnectedOutcome::Shutdown => {
                 graceful_shutdown(&mut child, config.shutdown_grace_period).await;
                 let _ = events.send(SupervisorEvent::ShutDown).await;
                 return;
