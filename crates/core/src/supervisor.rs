@@ -85,11 +85,17 @@ struct PendingCall {
 }
 
 /// Handle to a running supervision task for one upstream.
+///
+/// `shutdown_tx`/`task` are `Mutex<Option<_>>` (not plain fields) so
+/// `shutdown` can take `&self`: Gateway needs to fan out shutdown across
+/// every upstream concurrently via `Arc<Supervisor>`, which rules out a
+/// consuming `shutdown(self)`. Taking the `Option` out under the lock makes
+/// a second call a safe no-op instead of a double-shutdown bug.
 pub struct Supervisor {
     call_tx: mpsc::Sender<PendingCall>,
     call_timeout: Duration,
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<()>>,
+    shutdown_tx: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+    task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Supervisor {
@@ -108,8 +114,8 @@ impl Supervisor {
             Self {
                 call_tx,
                 call_timeout,
-                shutdown_tx: Some(shutdown_tx),
-                task: Some(task),
+                shutdown_tx: std::sync::Mutex::new(Some(shutdown_tx)),
+                task: std::sync::Mutex::new(Some(task)),
             },
             events_rx,
         )
@@ -136,12 +142,20 @@ impl Supervisor {
     }
 
     /// Requests graceful shutdown (SIGTERM, then SIGKILL after the grace
-    /// period) and waits for the supervision task to finish.
-    pub async fn shutdown(mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
+    /// period) and waits for the supervision task to finish. Safe to call
+    /// more than once (or concurrently): every call after the first is a
+    /// no-op that still waits for the same underlying task.
+    pub async fn shutdown(&self) {
+        let maybe_tx = self
+            .shutdown_tx
+            .lock()
+            .expect("shutdown_tx mutex is never poisoned")
+            .take();
+        if let Some(tx) = maybe_tx {
             let _ = tx.send(());
         }
-        if let Some(task) = self.task.take() {
+        let maybe_task = self.task.lock().expect("task mutex is never poisoned").take();
+        if let Some(task) = maybe_task {
             let _ = task.await;
         }
     }

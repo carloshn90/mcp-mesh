@@ -2,7 +2,7 @@
 //! per upstream into a single `tools/list` / `tools/call` entry point.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use mcp_mesh_protocol::jsonrpc::{Id, Outcome};
 use mcp_mesh_protocol::mcp::{Tool, ToolsCallParams, ToolsListResult, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST};
@@ -15,8 +15,13 @@ use crate::UpstreamId;
 
 /// Owns every upstream's `Supervisor`, and routes `tools/list`/`tools/call`
 /// requests through the registry's namespacing and the metadata cache.
+///
+/// Supervisors are kept behind `Arc` (not held directly) so `handle_request`
+/// and `shutdown` only ever need `&self` -- the whole `Gateway` can sit
+/// behind its own `Arc` and be shared with, e.g., a Unix-socket server
+/// handling several concurrent clients.
 pub struct Gateway {
-    supervisors: HashMap<UpstreamId, Supervisor>,
+    supervisors: HashMap<UpstreamId, Arc<Supervisor>>,
     registry: RwLock<ToolRegistry>,
     cache: MetadataCache,
 }
@@ -27,6 +32,10 @@ impl Gateway {
     /// upstream whose initial fetch fails simply contributes no tools until
     /// a later refresh succeeds.
     pub async fn new(supervisors: HashMap<UpstreamId, Supervisor>) -> Self {
+        let supervisors: HashMap<UpstreamId, Arc<Supervisor>> = supervisors
+            .into_iter()
+            .map(|(id, supervisor)| (id, Arc::new(supervisor)))
+            .collect();
         let gateway = Self {
             supervisors,
             registry: RwLock::new(ToolRegistry::new()),
@@ -41,11 +50,13 @@ impl Gateway {
 
     /// Gracefully shuts down every upstream concurrently (each via its own
     /// SIGTERM-then-SIGKILL sequence) and waits for all of them to finish.
-    pub async fn shutdown(self) {
+    /// Safe to call through a shared reference (e.g. `Arc<Gateway>`).
+    pub async fn shutdown(&self) {
         let tasks: Vec<_> = self
             .supervisors
-            .into_values()
-            .map(|supervisor| tokio::spawn(supervisor.shutdown()))
+            .values()
+            .cloned()
+            .map(|supervisor| tokio::spawn(async move { supervisor.shutdown().await }))
             .collect();
         for task in tasks {
             let _ = task.await;
