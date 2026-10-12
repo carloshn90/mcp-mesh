@@ -12,6 +12,10 @@ pub const METHOD_TOOLS_LIST: &str = "tools/list";
 pub const METHOD_TOOLS_CALL: &str = "tools/call";
 pub const METHOD_TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
 
+/// MCP protocol version this mesh speaks, both to upstreams (as a client)
+/// and to its own clients (as a server).
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Implementation {
     pub name: String,

@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use mcp_mesh_protocol::jsonrpc::{Id, Outcome, Request, V2};
-use mcp_mesh_protocol::mcp::{Implementation, InitializeParams, METHOD_INITIALIZE};
+use mcp_mesh_protocol::mcp::{Implementation, InitializeParams, MCP_PROTOCOL_VERSION, METHOD_INITIALIZE};
 use mcp_mesh_protocol::{Incoming, MessageReader, MessageWriter};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
@@ -163,7 +163,7 @@ impl Supervisor {
 
 fn initialize_request(id: Id) -> Request {
     let params = InitializeParams {
-        protocol_version: "2025-06-18".to_string(),
+        protocol_version: MCP_PROTOCOL_VERSION.to_string(),
         capabilities: serde_json::json!({}),
         client_info: Implementation {
             name: "mcp-mesh".to_string(),

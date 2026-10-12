@@ -3,7 +3,10 @@ use std::time::Duration;
 
 use mcp_mesh_core::{Gateway, Supervisor, SupervisorConfig, SupervisorEvent, UpstreamSpec};
 use mcp_mesh_protocol::jsonrpc::{Id, Outcome, Request, V2};
-use mcp_mesh_protocol::mcp::{ToolsCallParams, ToolsListResult, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST};
+use mcp_mesh_protocol::mcp::{
+    InitializeResult, ToolsCallParams, ToolsListResult, MCP_PROTOCOL_VERSION, METHOD_INITIALIZE,
+    METHOD_TOOLS_CALL, METHOD_TOOLS_LIST,
+};
 
 fn fixture_spec(label: &str) -> UpstreamSpec {
     UpstreamSpec {
@@ -50,6 +53,22 @@ async fn three_upstream_gateway() -> Gateway {
         supervisors.insert(label.to_string(), spawn_ready(label).await);
     }
     Gateway::new(supervisors).await
+}
+
+#[tokio::test]
+async fn initialize_returns_server_info_and_protocol_version() {
+    let gateway = Gateway::new(HashMap::new()).await;
+
+    let response = gateway
+        .handle_request(request(0, METHOD_INITIALIZE, None))
+        .await;
+    let Outcome::Success { result } = response.outcome else {
+        panic!("expected a successful initialize response, got {:?}", response.outcome)
+    };
+    let parsed: InitializeResult = serde_json::from_value(result).unwrap();
+
+    assert_eq!(parsed.protocol_version, MCP_PROTOCOL_VERSION);
+    assert_eq!(parsed.server_info.name, "mcp-mesh");
 }
 
 #[tokio::test]

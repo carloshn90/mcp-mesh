@@ -23,7 +23,7 @@ use std::sync::Arc;
 use mcp_mesh_protocol::jsonrpc::{Id, Response};
 use mcp_mesh_protocol::mcp::{
     Implementation, InitializeResult, Tool, ToolsCallParams, ToolsCallResult, ToolsListResult,
-    METHOD_INITIALIZE, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST,
+    MCP_PROTOCOL_VERSION, METHOD_INITIALIZE, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST,
 };
 use serde_json::Value;
 
@@ -86,7 +86,7 @@ fn handle(value: &Value, fail_init: bool) -> Response {
         }
         METHOD_INITIALIZE => {
             let result = InitializeResult {
-                protocol_version: "2025-06-18".to_string(),
+                protocol_version: MCP_PROTOCOL_VERSION.to_string(),
                 capabilities: serde_json::json!({}),
                 server_info: Implementation {
                     name: "echo-fixture".to_string(),

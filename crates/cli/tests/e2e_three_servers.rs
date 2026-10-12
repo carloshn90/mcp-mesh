@@ -24,7 +24,7 @@ fn unique_path(label: &str, extension: &str) -> PathBuf {
 }
 
 fn write_config(path: &Path) {
-    let echo_server = env!("CARGO_BIN_EXE_echo_server");
+    let echo_server = env!("CARGO_BIN_EXE_cli_echo_server");
     let mut toml = String::new();
     for label in UPSTREAM_LABELS {
         toml += &format!(

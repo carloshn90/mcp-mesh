@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use mcp_mesh_protocol::jsonrpc::{Id, Outcome};
-use mcp_mesh_protocol::mcp::{Tool, ToolsCallParams, ToolsListResult, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST};
+use mcp_mesh_protocol::mcp::{
+    Implementation, InitializeResult, Tool, ToolsCallParams, ToolsListResult, MCP_PROTOCOL_VERSION,
+    METHOD_INITIALIZE, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST,
+};
 use mcp_mesh_protocol::{Request, Response};
 
 use crate::cache::MetadataCache;
@@ -84,6 +87,7 @@ impl Gateway {
 
     pub async fn handle_request(&self, request: Request) -> Response {
         match request.method.as_str() {
+            METHOD_INITIALIZE => handle_initialize(request.id),
             METHOD_TOOLS_LIST => self.handle_tools_list(request.id),
             METHOD_TOOLS_CALL => self.handle_tools_call(request).await,
             other => Response::error(request.id, -32601, format!("method not found: {other}")),
@@ -139,6 +143,24 @@ impl Gateway {
             Err(err) => Response::error(id, -32002, format!("upstream call failed: {err:?}")),
         }
     }
+}
+
+/// Answers a client's `initialize` handshake. Declares the `tools`
+/// capability with no `listChanged` support, since the mesh doesn't yet
+/// forward upstream `listChanged` notifications to its own clients.
+fn handle_initialize(id: Id) -> Response {
+    let result = InitializeResult {
+        protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+        capabilities: serde_json::json!({"tools": {}}),
+        server_info: Implementation {
+            name: "mcp-mesh".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    };
+    Response::success(
+        id,
+        serde_json::to_value(result).expect("InitializeResult always serializes"),
+    )
 }
 
 async fn fetch_tools(supervisor: &Supervisor) -> Result<Vec<Tool>, String> {
