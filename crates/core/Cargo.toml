@@ -17,6 +17,14 @@ nix = { version = "0.29", features = ["signal"] }
 # referenced by the library, so it never reaches the shipped mcp-mesh CLI.
 signal-hook = "0.3"
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
+
 [[bin]]
 name = "echo_server"
 path = "tests/fixtures/echo_server.rs"
+
+[[bench]]
+name = "gateway_latency"
+harness = false
