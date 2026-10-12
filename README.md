@@ -50,25 +50,34 @@ mcp-mesh mesh.toml
 ```
 
 mcp-mesh speaks newline-delimited JSON-RPC 2.0 (one message per line) on its
-own stdin/stdout, so the usual way to use it is to have your MCP client
-*spawn* `mcp-mesh mesh.toml` as its server process, the same way it would
-spawn any single stdio MCP server directly. Closing stdin (the client
-exiting) shuts the whole mesh down — every upstream gets a graceful SIGTERM,
-then SIGKILL if it doesn't exit in time.
+own stdin/stdout and answers the standard MCP `initialize` handshake, so the
+usual way to use it is to have your MCP client *spawn* `mcp-mesh mesh.toml`
+as its server process — the same way it would spawn any single stdio MCP
+server directly. This works with off-the-shelf MCP clients (Claude Desktop,
+Spring AI's MCP client, etc.) with no special-casing needed. Closing stdin
+(the client exiting) shuts the whole mesh down — every upstream gets a
+graceful SIGTERM, then SIGKILL if it doesn't exit in time.
 
 You can also drive it by hand to see what's going on:
 
 ```bash
 mcp-mesh mesh.toml <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"tools/list"}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"1.0"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
 EOF
 ```
 
 which prints back one JSON-RPC response line per request, e.g.
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"fs__read_file", ...}, {"name":"git__log", ...}]}}
+{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}},"protocolVersion":"2025-06-18","serverInfo":{"name":"mcp-mesh","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fs__read_file", ...}, {"name":"git__log", ...}]}}
 ```
+
+Note the mesh's declared `capabilities` doesn't include `tools.listChanged`
+yet — it refreshes its own tool list lazily, but doesn't push
+`notifications/tools/list_changed` on to clients when an upstream's tools
+change. That's a known gap, not yet part of any milestone's exit criteria.
 
 ### Multiple clients
 
