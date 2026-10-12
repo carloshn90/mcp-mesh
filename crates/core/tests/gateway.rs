@@ -121,3 +121,37 @@ async fn tools_call_with_an_unknown_method_returns_method_not_found() {
 
     assert!(matches!(response.outcome, Outcome::Error { .. }));
 }
+
+#[tokio::test]
+async fn shutdown_tears_down_every_upstream_concurrently() {
+    let grace_period = Duration::from_millis(200);
+    let config = SupervisorConfig {
+        shutdown_grace_period: grace_period,
+        ..fast_config()
+    };
+
+    let mut supervisors = HashMap::new();
+    for label in ["pg", "fs", "git"] {
+        let mut spec = fixture_spec(label);
+        spec.env
+            .push(("FIXTURE_IGNORE_SIGTERM".to_string(), "1".to_string()));
+        let (supervisor, mut events) = Supervisor::spawn(spec, config);
+        assert_eq!(events.recv().await, Some(SupervisorEvent::Spawned));
+        assert_eq!(events.recv().await, Some(SupervisorEvent::Ready));
+        supervisors.insert(label.to_string(), supervisor);
+    }
+    let gateway = Gateway::new(supervisors).await;
+
+    let start = std::time::Instant::now();
+    gateway.shutdown().await;
+    let elapsed = start.elapsed();
+
+    // Every upstream ignores SIGTERM, so each needs its own grace period
+    // before the SIGKILL fallback lands. If they were shut down one at a
+    // time this would take ~3x the grace period; concurrently it stays
+    // close to 1x.
+    assert!(
+        elapsed < grace_period * 2,
+        "expected concurrent shutdown, took {elapsed:?} for 3 upstreams with a {grace_period:?} grace period"
+    );
+}

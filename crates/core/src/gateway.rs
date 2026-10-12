@@ -39,6 +39,19 @@ impl Gateway {
         gateway
     }
 
+    /// Gracefully shuts down every upstream concurrently (each via its own
+    /// SIGTERM-then-SIGKILL sequence) and waits for all of them to finish.
+    pub async fn shutdown(self) {
+        let tasks: Vec<_> = self
+            .supervisors
+            .into_values()
+            .map(|supervisor| tokio::spawn(supervisor.shutdown()))
+            .collect();
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+
     /// Re-fetches `upstream`'s tool list through the cache and updates the
     /// registry's namespaced view. Returns the fetch error, if any, so
     /// callers can log it; a failure leaves the previous tools in place.
