@@ -27,6 +27,7 @@ name = "mcp-mesh-core"
 version = "0.1.0"
 dependencies = [
  "mcp-mesh-protocol",
+ "serde_json",
 ]
 
 [[package]]
